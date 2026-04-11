@@ -23,7 +23,7 @@ def format_elapsed(elapsed_seconds: float) -> str:
     Returns:
         A human-readable string like ``1m 5s``.
     """
-    total = int(elapsed_seconds)
+    total = max(0, int(elapsed_seconds))
     minutes = total // 60
     seconds = total % 60
     return f"{minutes}m {seconds}s"
