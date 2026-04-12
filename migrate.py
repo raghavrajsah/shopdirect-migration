@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from collections.abc import Callable
@@ -317,34 +318,47 @@ def _wait_for_merge_manual(pr_urls: list[str], message: str) -> None:
     console.print()
 
 
-def _auto_merge_prs(gh: GitHubClient, pr_urls: list[str], phase_label: str) -> None:
+def _auto_merge_prs(gh: GitHubClient, pr_urls: list[str], phase_label: str) -> bool:
     """Auto-merge a list of PRs via the GitHub API.
 
     For each PR, polls until it is mergeable, then squash-merges it.
-    Prints status for each PR.  If a merge fails the user is warned
-    but the orchestrator continues.
+    Prints status for each PR.
 
     Args:
         gh: Initialised GitHub API client.
         pr_urls: GitHub PR URLs to merge.
         phase_label: Human-readable phase name for log output.
+
+    Returns:
+        ``True`` if **all** PRs were merged successfully, ``False`` otherwise.
     """
+    all_ok = True
+    # Use print() alongside console.print() to ensure visibility even if
+    # Rich's Live context interferes with console output.
+    print(f"\n>>> Auto-merging {phase_label} PR(s)…")
     console.print()
     console.print(f"[bold green]Auto-merging {phase_label} PR(s)…[/bold green]")
     for url in pr_urls:
+        print(f"  Merging {url} …", end=" ", flush=True)
         console.print(f"  Merging {url} …", end=" ")
         try:
             owner, repo, pr_number = parse_pr_url(url)
             ok = gh.wait_and_merge(owner, repo, pr_number)
             if ok:
+                print("merged")
                 console.print("[green]merged[/green]")
             else:
+                print("FAILED (conflict, CI, or timeout)")
                 console.print(
                     "[red]failed (conflict, CI, or timeout) — merge manually[/red]"
                 )
+                all_ok = False
         except Exception as exc:
+            print(f"ERROR: {exc}")
             console.print(f"[red]error: {exc}[/red]")
+            all_ok = False
     console.print()
+    return all_ok
 
 
 # ------------------------------------------------------------------
@@ -845,6 +859,13 @@ def main() -> None:
     """
     args = _parse_args()
 
+    # Enable logging so github_client debug output is visible.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     # 1. Scan
     console.print(f"[bold]Scanning[/bold] {args.repo} …")
     plan = scan_and_plan(args.repo)
@@ -940,6 +961,12 @@ def main() -> None:
 
             # Merge gate — always pause after foundation completes.
             live.stop()
+            print(
+                f"\n>>> Foundation merge gate: "
+                f"status={phase_state.foundation_status} "
+                f"pr_url={phase_state.foundation_pr_url} "
+                f"no_auto_merge={args.no_auto_merge}"
+            )
             if phase_state.foundation_pr_url:
                 if args.no_auto_merge:
                     _wait_for_merge_manual(
@@ -949,8 +976,22 @@ def main() -> None:
                     )
                 else:
                     assert gh is not None
-                    _auto_merge_prs(gh, [phase_state.foundation_pr_url], "foundation")
+                    ok = _auto_merge_prs(gh, [phase_state.foundation_pr_url], "foundation")
+                    if not ok:
+                        print(
+                            "\n>>> Auto-merge FAILED for foundation PR. "
+                            "Please merge it manually, then press Enter to continue…"
+                        )
+                        console.print(
+                            "[bold red]Auto-merge failed for foundation PR. "
+                            "Please merge it manually, then press Enter…[/bold red]"
+                        )
+                        input()
             else:
+                print(
+                    "\n>>> Foundation completed but no PR URL was detected. "
+                    "Check the session for a PR, merge it, then press Enter…"
+                )
                 console.print(
                     "[bold yellow]Foundation completed but no PR URL was detected.[/bold yellow]"
                 )
@@ -984,6 +1025,11 @@ def main() -> None:
                 if b.get("pr_url") and b["status"] == "complete"
             ]
             live.stop()
+            print(
+                f"\n>>> Batch merge gate: "
+                f"{len(batch_pr_urls)} PR URL(s) found "
+                f"no_auto_merge={args.no_auto_merge}"
+            )
             if batch_pr_urls:
                 if args.no_auto_merge:
                     _wait_for_merge_manual(
@@ -993,7 +1039,17 @@ def main() -> None:
                     )
                 else:
                     assert gh is not None
-                    _auto_merge_prs(gh, batch_pr_urls, "batch")
+                    ok = _auto_merge_prs(gh, batch_pr_urls, "batch")
+                    if not ok:
+                        print(
+                            "\n>>> Auto-merge FAILED for one or more batch PRs. "
+                            "Please merge them manually, then press Enter to continue…"
+                        )
+                        console.print(
+                            "[bold red]Auto-merge failed for one or more batch PRs. "
+                            "Please merge them manually, then press Enter…[/bold red]"
+                        )
+                        input()
             else:
                 completed_batches = [
                     b for b in plan["batches"] if b["status"] == "complete"
