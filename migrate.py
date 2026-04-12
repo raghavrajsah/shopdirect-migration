@@ -18,6 +18,11 @@ from scanner import get_all_tiers, get_batches_by_tier, scan_and_plan
 
 _POLL_INTERVAL_SECONDS = 30
 
+# Extra polls after a session reaches terminal status to discover the PR URL.
+# The Devin API may not populate pull_requests immediately on session exit.
+_PR_DISCOVERY_RETRIES = 6
+_PR_DISCOVERY_INTERVAL_SECONDS = 10
+
 console = Console()
 
 
@@ -203,6 +208,9 @@ def map_session_to_batch_status(session_data: dict) -> str:
 def extract_pr_url(session_data: dict) -> str | None:
     """Extract the first pull request URL from session data, if available.
 
+    Checks ``pull_requests[].pr_url``, ``pull_requests[].html_url``,
+    ``pull_requests[].url``, and ``structured_output.pr_url``.
+
     Args:
         session_data: Session details from the Devin API.
 
@@ -211,7 +219,8 @@ def extract_pr_url(session_data: dict) -> str | None:
     """
     pull_requests = session_data.get("pull_requests") or []
     if pull_requests:
-        url = pull_requests[0].get("pr_url") or pull_requests[0].get("html_url")
+        pr = pull_requests[0]
+        url = pr.get("pr_url") or pr.get("html_url") or pr.get("url")
         if url:
             return url
 
@@ -220,6 +229,40 @@ def extract_pr_url(session_data: dict) -> str | None:
     if pr_url:
         return pr_url
 
+    return None
+
+
+def _discover_pr_url(
+    client: DevinClient,
+    session_id: str,
+    label: str,
+) -> str | None:
+    """Poll a completed session a few extra times to discover its PR URL.
+
+    The Devin API may not populate ``pull_requests`` on the exact poll
+    where the session transitions to a terminal state.  This helper
+    retries a handful of times with short intervals.
+
+    Args:
+        client: Initialised Devin API client.
+        session_id: The session to query.
+        label: Human-readable name for log messages.
+
+    Returns:
+        The PR URL if found, otherwise ``None``.
+    """
+    for attempt in range(1, _PR_DISCOVERY_RETRIES + 1):
+        time.sleep(_PR_DISCOVERY_INTERVAL_SECONDS)
+        try:
+            data = client.get_session(session_id)
+        except Exception:
+            continue
+        pr_url = extract_pr_url(data)
+        if pr_url:
+            console.print(
+                f"[green]{label} PR discovered on retry {attempt}: {pr_url}[/green]"
+            )
+            return pr_url
     return None
 
 
@@ -434,6 +477,18 @@ def run_foundation_phase(
         if is_terminal_status(data):
             break
 
+    # The API may not populate pull_requests on the exact poll where the
+    # session reaches terminal status.  Retry a few times if needed.
+    if not phase_state.foundation_pr_url and phase_state.foundation_status == "complete":
+        console.print(
+            "[yellow]Foundation completed but PR URL not found yet — "
+            "retrying discovery…[/yellow]"
+        )
+        discovered = _discover_pr_url(client, session_id, "Foundation")
+        if discovered:
+            phase_state.foundation_pr_url = discovered
+            _refresh()
+
 
 # ------------------------------------------------------------------
 # Phase 3 — Consolidation
@@ -557,6 +612,17 @@ def run_consolidation_phase(
         if is_terminal_status(data):
             break
 
+    # Retry PR URL discovery if not found on terminal poll.
+    if not phase_state.consolidation_pr_url and phase_state.consolidation_status == "complete":
+        console.print(
+            "[yellow]Consolidation completed but PR URL not found yet — "
+            "retrying discovery…[/yellow]"
+        )
+        discovered = _discover_pr_url(client, session_id, "Consolidation")
+        if discovered:
+            phase_state.consolidation_pr_url = discovered
+            _refresh()
+
 
 # ------------------------------------------------------------------
 # Tier-by-tier parallel batch runner (existing logic, updated refresh)
@@ -669,7 +735,12 @@ def run_tier(
                 finished_ids.append(session_id)
 
         for sid in finished_ids:
-            del active[sid]
+            batch = active.pop(sid)
+            # Retry PR URL discovery for completed batches if not found.
+            if batch["status"] == "complete" and not batch.get("pr_url"):
+                discovered = _discover_pr_url(client, sid, batch["name"])
+                if discovered:
+                    batch["pr_url"] = discovered
 
         # Backfill new sessions.
         while pending and len(active) < max_parallel:
@@ -867,9 +938,9 @@ def main() -> None:
                 )
                 sys.exit(1)
 
-            # Merge gate — auto-merge or wait for manual merge.
+            # Merge gate — always pause after foundation completes.
+            live.stop()
             if phase_state.foundation_pr_url:
-                live.stop()
                 if args.no_auto_merge:
                     _wait_for_merge_manual(
                         [phase_state.foundation_pr_url],
@@ -879,7 +950,17 @@ def main() -> None:
                 else:
                     assert gh is not None
                     _auto_merge_prs(gh, [phase_state.foundation_pr_url], "foundation")
-                live.start()
+            else:
+                console.print(
+                    "[bold yellow]Foundation completed but no PR URL was detected.[/bold yellow]"
+                )
+                console.print(
+                    "[yellow]Batch sessions need the foundation changes merged into the "
+                    "default branch. Check the foundation session for a PR, merge it, "
+                    "then press Enter to continue…[/yellow]"
+                )
+                input()
+            live.start()
 
             # ── Phase 1–2 — Parallel migration batches (tier by tier) ──
             console.print("[bold blue]\u25b6 Phase 1\u20132: Parallel Migration Batches[/bold blue]")
@@ -897,13 +978,13 @@ def main() -> None:
                     live=live,
                 )
 
-            # Merge gate — auto-merge or wait for manual merge.
+            # Merge gate — always pause after batches complete.
             batch_pr_urls = [
                 b["pr_url"] for b in plan["batches"]
                 if b.get("pr_url") and b["status"] == "complete"
             ]
+            live.stop()
             if batch_pr_urls:
-                live.stop()
                 if args.no_auto_merge:
                     _wait_for_merge_manual(
                         batch_pr_urls,
@@ -913,7 +994,22 @@ def main() -> None:
                 else:
                     assert gh is not None
                     _auto_merge_prs(gh, batch_pr_urls, "batch")
-                live.start()
+            else:
+                completed_batches = [
+                    b for b in plan["batches"] if b["status"] == "complete"
+                ]
+                if completed_batches:
+                    console.print(
+                        "[bold yellow]Batch sessions completed but no PR URLs "
+                        "were detected.[/bold yellow]"
+                    )
+                    console.print(
+                        "[yellow]Consolidation needs the batch changes merged. "
+                        "Check batch sessions for PRs, merge them, then press "
+                        "Enter to continue…[/yellow]"
+                    )
+                    input()
+            live.start()
 
             # ── Phase 3 — Consolidation ──
             console.print("[bold blue]\u25b6 Phase 3: Consolidation[/bold blue]")
