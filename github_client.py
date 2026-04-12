@@ -75,17 +75,20 @@ class GitHubClient:
         return cls(token)
 
     def validate_repo_access(self, owner: str, repo: str) -> None:
-        """Verify the token can access the given repository.
+        """Verify the token can read *and merge PRs* in the given repository.
 
-        Makes a lightweight ``GET /repos/{owner}/{repo}`` call.  Raises
-        a clear error if the token lacks access (404) or is invalid (401/403).
+        Makes a ``GET /repos/{owner}/{repo}`` call to check basic access,
+        then inspects the ``permissions`` object in the response to verify
+        the token has push (write) access — which is required for merging
+        pull requests.
 
         Args:
             owner: Repository owner (user or org).
             repo: Repository name.
 
         Raises:
-            RuntimeError: If the token cannot access the repository.
+            RuntimeError: If the token cannot access the repository or
+                lacks write permissions.
         """
         url = f"{self.BASE}/repos/{owner}/{repo}"
         resp = self._session.get(url)
@@ -97,20 +100,40 @@ class GitHubClient:
         if resp.status_code == 403:
             raise RuntimeError(
                 f"GITHUB_TOKEN does not have permission to access {owner}/{repo} "
-                f"(403 Forbidden). Ensure the token has the 'repo' scope."
+                f"(403 Forbidden). Ensure the token has the 'repo' scope "
+                f"(classic PAT) or 'Contents: Read and write' + "
+                f"'Pull requests: Read and write' (fine-grained PAT)."
             )
         if resp.status_code == 404:
             raise RuntimeError(
                 f"GITHUB_TOKEN cannot access {owner}/{repo} (404 Not Found). "
                 f"This usually means:\n"
-                f"  • The repo is private and the token lacks 'repo' scope\n"
-                f"  • The token is a fine-grained PAT not scoped to this repo\n"
+                f"  \u2022 The repo is private and the token lacks 'repo' scope\n"
+                f"  \u2022 The token is a fine-grained PAT not scoped to this repo\n"
                 f"Generate a token with 'repo' scope at "
                 f"https://github.com/settings/tokens"
             )
         resp.raise_for_status()
+
+        # Check write permission — required for merging PRs.
+        data = resp.json()
+        permissions = data.get("permissions", {})
+        has_push = permissions.get("push", False)
         log.info(
-            "[validate] Token has access to %s/%s",
+            "[validate] Token permissions for %s/%s: %s",
+            owner, repo, permissions,
+        )
+        if not has_push:
+            raise RuntimeError(
+                f"GITHUB_TOKEN can read {owner}/{repo} but lacks write "
+                f"access (push=false). Merging PRs requires write permission.\n"
+                f"For fine-grained PATs, add 'Contents: Read and write' "
+                f"permission.\n"
+                f"For classic PATs, ensure the 'repo' scope is enabled.\n"
+                f"Update your token at https://github.com/settings/tokens"
+            )
+        log.info(
+            "[validate] Token has read+write access to %s/%s",
             owner, repo,
         )
 
@@ -235,11 +258,31 @@ class GitHubClient:
                     log.info("[auto-merge] Merge succeeded!")
                     return True
                 except requests.HTTPError as exc:
-                    log.warning(
-                        "[auto-merge] Merge API returned %s: %s — will retry.",
-                        exc.response.status_code if exc.response is not None else "?",
-                        exc.response.text[:200] if exc.response is not None else str(exc),
+                    status_code = (
+                        exc.response.status_code
+                        if exc.response is not None
+                        else None
                     )
+                    body = (
+                        exc.response.text[:200]
+                        if exc.response is not None
+                        else str(exc)
+                    )
+                    log.warning(
+                        "[auto-merge] Merge API returned %s: %s",
+                        status_code, body,
+                    )
+                    # 401/403 are permission errors — retrying won't help.
+                    if status_code in {401, 403}:
+                        log.error(
+                            "[auto-merge] Permission denied (HTTP %d). "
+                            "The token likely lacks 'Contents: Read and "
+                            "write' permission (fine-grained PAT) or "
+                            "'repo' scope (classic PAT). Giving up.",
+                            status_code,
+                        )
+                        return False
+                    # Other errors (e.g. 405, 409) may be transient.
             else:
                 log.info(
                     "[auto-merge] mergeable_state=%r not in allowed set — waiting…",
