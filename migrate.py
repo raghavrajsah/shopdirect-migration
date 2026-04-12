@@ -38,6 +38,12 @@ _MAX_TRANSIENT_POLL_ERRORS = 3
 _MAX_SESSION_CREATE_RETRIES = 3
 _SESSION_CREATE_RETRY_DELAY = 15
 
+# 429 rate-limit retries — the Devin API returns 429 when too many sessions
+# are active.  We use a longer backoff because we need to wait for existing
+# sessions to finish before new slots open up.
+_MAX_RATE_LIMIT_RETRIES = 6
+_RATE_LIMIT_RETRY_DELAY = 60  # seconds
+
 console = Console()
 
 
@@ -265,12 +271,34 @@ def _is_transient_error(exc: Exception) -> bool:
     return False
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if *exc* is a 429 Too Many Requests error.
+
+    The Devin API returns 429 when the org has too many concurrent sessions.
+    Unlike transient 5xx errors, these require a longer backoff because we
+    need to wait for existing sessions to finish before new slots open.
+    """
+    if _RequestsHTTPError is not None and isinstance(exc, _RequestsHTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp.status_code == 429:
+            return True
+    text = str(exc)
+    if "429" in text and "Too Many Requests" in text:
+        return True
+    return False
+
+
 def _create_session_with_retry(
     client: DevinClient,
     label: str,
     **kwargs: object,
 ) -> dict | None:
-    """Create a Devin session, retrying on transient errors.
+    """Create a Devin session, retrying on transient and rate-limit errors.
+
+    Handles two kinds of retryable failures:
+    - **5xx** (transient server errors): short backoff, up to 3 retries.
+    - **429** (rate limit / too many concurrent sessions): longer backoff
+      (60s), up to 6 retries — gives existing sessions time to finish.
 
     Args:
         client: Initialised Devin API client.
@@ -280,27 +308,50 @@ def _create_session_with_retry(
     Returns:
         The API response dict on success, or ``None`` if all retries failed.
     """
+    transient_attempts = 0
+    rate_limit_attempts = 0
     last_exc: Exception | None = None
-    for attempt in range(1, _MAX_SESSION_CREATE_RETRIES + 1):
+
+    max_total = _MAX_SESSION_CREATE_RETRIES + _MAX_RATE_LIMIT_RETRIES
+    for _ in range(max_total):
         try:
             resp = client.create_session(**kwargs)  # type: ignore[arg-type]
             return resp
         except Exception as exc:
             last_exc = exc
-            if _is_transient_error(exc) and attempt < _MAX_SESSION_CREATE_RETRIES:
+
+            if _is_rate_limit_error(exc) and rate_limit_attempts < _MAX_RATE_LIMIT_RETRIES:
+                rate_limit_attempts += 1
                 print(
-                    f">>> Session creation for {label} failed (attempt {attempt}/"
-                    f"{_MAX_SESSION_CREATE_RETRIES}): {exc} — retrying in "
-                    f"{_SESSION_CREATE_RETRY_DELAY}s…"
+                    f">>> Rate limited creating {label} ({rate_limit_attempts}/"
+                    f"{_MAX_RATE_LIMIT_RETRIES}): waiting {_RATE_LIMIT_RETRY_DELAY}s "
+                    f"for session slots to free up…"
+                )
+                console.print(
+                    f"[yellow]Rate limited creating {label} ({rate_limit_attempts}/"
+                    f"{_MAX_RATE_LIMIT_RETRIES}): waiting "
+                    f"{_RATE_LIMIT_RETRY_DELAY}s…[/yellow]"
+                )
+                time.sleep(_RATE_LIMIT_RETRY_DELAY)
+                continue
+
+            if _is_transient_error(exc) and transient_attempts < _MAX_SESSION_CREATE_RETRIES:
+                transient_attempts += 1
+                print(
+                    f">>> Session creation for {label} failed (attempt "
+                    f"{transient_attempts}/{_MAX_SESSION_CREATE_RETRIES}): "
+                    f"{exc} — retrying in {_SESSION_CREATE_RETRY_DELAY}s…"
                 )
                 console.print(
                     f"[yellow]Session creation for {label} failed (attempt "
-                    f"{attempt}/{_MAX_SESSION_CREATE_RETRIES}): {exc} — "
-                    f"retrying…[/yellow]"
+                    f"{transient_attempts}/{_MAX_SESSION_CREATE_RETRIES}): "
+                    f"{exc} — retrying…[/yellow]"
                 )
                 time.sleep(_SESSION_CREATE_RETRY_DELAY)
-            else:
-                break
+                continue
+
+            # Non-retryable error — give up immediately.
+            break
 
     print(f">>> Failed to create session for {label}: {last_exc}")
     console.print(f"[red]Failed to create session for {label}: {last_exc}[/red]")
