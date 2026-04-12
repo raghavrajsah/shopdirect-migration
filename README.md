@@ -10,6 +10,8 @@ Devin is used here as a scoped execution engine, not a code generator. Each Devi
 
 ## Architecture
 
+> See [DESIGN.md](DESIGN.md) for detailed internal architecture, module breakdown, and implementation decisions.
+
 ```mermaid
 flowchart TD
     A["Phase 0 — Foundation\nAnalyze repo, create shared types, add tsconfig"] --> MG1["🔀 Merge Gate\nAuto-merge or manual review"]
