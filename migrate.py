@@ -165,7 +165,13 @@ def run_tier(
                 title=f"ShopDirect TS Migration: {batch['name']}",
                 max_acu_limit=10,
             )
-            session_id = resp.get("session_id", resp.get("id", ""))
+            session_id = resp.get("session_id") or resp.get("id")
+            if not session_id:
+                console.print(
+                    f"[red]API returned no session ID for {batch['name']} — marking blocked[/red]"
+                )
+                batch["status"] = "blocked"
+                return
             session_url = resp.get("url") or resp.get("session_url", "")
             batch["status"] = "running"
             batch["session_id"] = session_id
