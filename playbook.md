@@ -29,7 +29,8 @@ Migrate the assigned batch of JavaScript/JSX files to TypeScript/TSX. Add types 
 
 - Do **not** change business logic.
 - Do **not** perform unrelated refactors.
-- Do **not** edit files outside the assigned batch except for directly necessary import or type updates.
+- Do **not** make stylistic, architectural, or cleanup changes unrelated to the migration.
+- Do **not** edit files outside the assigned batch except for directly necessary import, type, or compile-fix updates caused by the migration.
 - Keep code style consistent with the existing codebase.
 
 ## Final Output
