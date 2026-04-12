@@ -1096,16 +1096,39 @@ def main() -> None:
                 )
 
             # Merge gate — always pause after batches complete.
+            # Collect PR URLs from ALL batches that have one, regardless of
+            # status.  A batch marked "blocked" (e.g. by a transient API
+            # error) may still have opened a perfectly valid PR.
             batch_pr_urls = [
                 b["pr_url"] for b in plan["batches"]
-                if b.get("pr_url") and b["status"] == "complete"
+                if b.get("pr_url")
+            ]
+            blocked_batches = [
+                b for b in plan["batches"] if b["status"] == "blocked"
+            ]
+            completed_batches = [
+                b for b in plan["batches"] if b["status"] == "complete"
             ]
             live.stop()
             print(
                 f"\n>>> Batch merge gate: "
-                f"{len(batch_pr_urls)} PR URL(s) found "
+                f"{len(batch_pr_urls)} PR URL(s) found, "
+                f"{len(completed_batches)} complete, "
+                f"{len(blocked_batches)} blocked, "
                 f"no_auto_merge={args.no_auto_merge}"
             )
+            if blocked_batches:
+                blocked_names = ", ".join(b["name"] for b in blocked_batches)
+                blocked_with_prs = [b for b in blocked_batches if b.get("pr_url")]
+                console.print(
+                    f"[yellow]⚠ {len(blocked_batches)} batch(es) marked blocked: "
+                    f"{blocked_names}[/yellow]"
+                )
+                if blocked_with_prs:
+                    console.print(
+                        f"[yellow]  {len(blocked_with_prs)} of these still have "
+                        f"PR(s) that will be included in the merge.[/yellow]"
+                    )
             if batch_pr_urls:
                 if args.no_auto_merge:
                     _wait_for_merge_manual(
@@ -1127,12 +1150,9 @@ def main() -> None:
                         )
                         input()
             else:
-                completed_batches = [
-                    b for b in plan["batches"] if b["status"] == "complete"
-                ]
-                if completed_batches:
+                if completed_batches or blocked_batches:
                     console.print(
-                        "[bold yellow]Batch sessions completed but no PR URLs "
+                        "[bold yellow]Batch sessions finished but no PR URLs "
                         "were detected.[/bold yellow]"
                     )
                     console.print(
