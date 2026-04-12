@@ -10,29 +10,50 @@ Devin is used here as a scoped execution engine, not a code generator. Each Devi
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    subgraph Orchestrator["Orchestrator (CLI)"]
+        direction LR
+        scan["Scan repo"] --> plan["Plan batches"] --> launch["Launch sessions"]
+        launch --> poll["Poll & track"] --> merge["Merge gates"] --> summary["Summary"]
+    end
+
+    Orchestrator --> P0
+    Orchestrator --> P1
+    Orchestrator --> P2
+
+    subgraph P0["Phase 0 — Foundation"]
+        f1["Analyse repo"]
+        f2["Create src/types/"]
+        f3["Add tsconfig.json"]
+        f4["Open PR"]
+        f1 --> f2 --> f3 --> f4
+    end
+
+    P0 -->|"Merge Gate"| P1
+
+    subgraph P1["Phase 1 — Parallel Migration"]
+        direction LR
+        t1["Tier 1\nutils, constants, data"]
+        t2["Tier 2\nhooks, services, contexts"]
+        t3["Tier 3\ncomponents"]
+        t4["Tier 4\npages"]
+        t1 --> t2 --> t3 --> t4
+    end
+
+    P1 -->|"Merge Gate"| P2
+
+    subgraph P2["Phase 2 — Consolidation"]
+        c1["Run tsc --noEmit"]
+        c2["Fix cross-batch mismatches"]
+        c3["Deduplicate shared types"]
+        c4["Open cleanup PR"]
+        c1 --> c2 --> c3 --> c4
+    end
 ```
-┌─────────────────────────────────────────────────────┐
-│                   Orchestrator (CLI)                 │
-│                                                     │
-│  scan repo → plan batches → launch sessions → poll  │
-│  → merge gates → auto-merge PRs → final summary     │
-└──────────┬──────────────┬──────────────┬────────────┘
-           │              │              │
-     ┌─────▼─────┐  ┌────▼────┐  ┌──────▼──────┐
-     │ Phase 0   │  │ Phase 1 │  │  Phase 2    │
-     │Foundation │  │ Parallel│  │Consolidation│
-     │           │  │ Batches │  │             │
-     │ Analyse   │  │ Tier 1  │  │ Run tsc     │
-     │ repo,     │  │ Tier 2  │  │ Fix cross-  │
-     │ create    │  │ Tier 3  │  │ batch type  │
-     │ src/types │  │ Tier 4  │  │ mismatches, │
-     │ + tsconfig│  │         │  │ deduplicate │
-     └─────┬─────┘  └────┬────┘  └──────┬──────┘
-           │              │              │
-      merge gate     merge gate      cleanup PR
-           │              │
-    ▼ batches start  ▼ consolidation starts
-```
+
+> [!IMPORTANT]
+> **Your team stays in control.** Both merge gates support two modes: fully automated (default) for overnight unattended runs, or manual review (`--no-auto-merge`) where the orchestrator pauses and waits for engineer approval before proceeding. For a first pilot, we recommend `--no-auto-merge` so your team can review foundation types and batch PRs before anything merges. As trust builds, switch to auto-merge for hands-free overnight migrations.
 
 **Three phases, two merge gates:**
 
