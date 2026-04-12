@@ -65,6 +65,8 @@ def build_batch_prompt(batch: dict) -> str:
         f"necessary import updates.\n"
         f"8. If you cannot complete cleanly, summarize the blockers in "
         f"your final message.\n"
+        f"9. Once the PR is open and verification passes, finish the session. "
+        f"Do NOT wait for manual testing or further instructions.\n"
     )
 
 
@@ -83,6 +85,10 @@ def is_terminal_status(session_data: dict) -> bool:
         return True
     if status == "running" and status_detail == "finished":
         return True
+    if status == "running" and status_detail == "waiting_for_user":
+        pull_requests = session_data.get("pull_requests") or []
+        if pull_requests:
+            return True
     return False
 
 
@@ -104,6 +110,9 @@ def map_session_to_batch_status(session_data: dict) -> str:
     if status in {"error", "suspended"}:
         return "blocked"
     if status == "running" and status_detail == "waiting_for_user":
+        pull_requests = session_data.get("pull_requests") or []
+        if pull_requests:
+            return "complete"
         return "needs_input"
     return "running"
 
