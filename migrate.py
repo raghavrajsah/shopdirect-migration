@@ -163,6 +163,7 @@ def run_tier(
     # Track which batches still need launching and which are in-flight.
     pending = list(tier_batches)
     active: dict[str, dict] = {}  # session_id -> batch
+    notified_needs_input: set[str] = set()  # session_ids already warned about
 
     def _refresh() -> None:
         live.update(build_progress_table(plan, time.time() - start_time))
@@ -217,7 +218,8 @@ def run_tier(
 
             batch["status"] = map_session_to_batch_status(data)
 
-            if batch["status"] == "needs_input":
+            if batch["status"] == "needs_input" and session_id not in notified_needs_input:
+                notified_needs_input.add(session_id)
                 session_url = batch.get("session_url", "")
                 console.print(
                     f"[yellow]\u26a0 {batch['name']} is waiting for user input \u2192 {session_url}[/yellow]"
