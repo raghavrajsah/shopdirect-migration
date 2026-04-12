@@ -254,20 +254,63 @@ def extract_pr_url(session_data: dict) -> str | None:
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """Return True if *exc* looks like a transient server-side error (5xx).
+    """Return True if *exc* looks like a transient error safe to retry.
 
-    These are safe to retry — a single 502 Bad Gateway from the Devin API
-    should not kill the entire run.
+    Covers:
+    - 5xx server errors (502 Bad Gateway, 503 Service Unavailable, etc.)
+    - Connection-level errors (RemoteDisconnected, ConnectionError,
+      ConnectionReset, timeout, etc.) — these happen when the server drops
+      the connection under load.
     """
+    # Check for requests HTTPError with 5xx status.
     if _RequestsHTTPError is not None and isinstance(exc, _RequestsHTTPError):
         resp = getattr(exc, "response", None)
         if resp is not None and 500 <= resp.status_code < 600:
             return True
+
+    # Check for connection-level errors by type name.
+    # These are always transient — the server dropped the connection.
+    exc_type_name = type(exc).__name__
+    connection_error_types = {
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "RemoteDisconnected",
+        "ConnectionRefusedError",
+        "BrokenPipeError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "Timeout",
+    }
+    if exc_type_name in connection_error_types:
+        return True
+
+    # Also check the exception chain — requests wraps low-level errors.
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None:
+        cause_type_name = type(cause).__name__
+        if cause_type_name in connection_error_types:
+            return True
+
     # Fall back to string matching for wrapped or non-requests errors.
     text = str(exc)
     for code in ("500", "502", "503", "504"):
         if code in text and ("Server Error" in text or "Bad Gateway" in text or "Service Unavailable" in text or "Gateway Timeout" in text):
             return True
+
+    # Catch connection errors by message content.
+    connection_keywords = (
+        "RemoteDisconnected",
+        "Connection aborted",
+        "Connection reset",
+        "Connection refused",
+        "Remote end closed connection",
+        "Read timed out",
+    )
+    for keyword in connection_keywords:
+        if keyword in text:
+            return True
+
     return False
 
 
