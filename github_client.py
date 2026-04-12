@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
 from typing import Any
 
 import requests
+
+log = logging.getLogger(__name__)
 
 # Polling interval when waiting for a PR to become mergeable.
 _MERGE_POLL_SECONDS = 10
@@ -144,28 +147,42 @@ class GitHubClient:
             ``True`` on successful merge, ``False`` otherwise.
         """
         deadline = time.time() + timeout
+        poll_count = 0
 
         while time.time() < deadline:
+            poll_count += 1
             pr = self.get_pull_request(owner, repo, pr_number)
 
+            state = pr.get("state")
+            merged = pr.get("merged")
+            mergeable = pr.get("mergeable")
+            mergeable_state = pr.get("mergeable_state", "")
+            log.info(
+                "[auto-merge] poll %d for %s/%s#%d: "
+                "state=%s merged=%s mergeable=%s mergeable_state=%s",
+                poll_count, owner, repo, pr_number,
+                state, merged, mergeable, mergeable_state,
+            )
+
             # Already merged by someone else.
-            if pr.get("merged"):
+            if merged:
+                log.info("[auto-merge] PR already merged.")
                 return True
 
             # Closed without merging.
-            if pr.get("state") == "closed":
+            if state == "closed":
+                log.info("[auto-merge] PR is closed — cannot merge.")
                 return False
-
-            mergeable = pr.get("mergeable")
-            mergeable_state = pr.get("mergeable_state", "")
 
             # GitHub sometimes returns null while computing mergeability.
             if mergeable is None:
+                log.info("[auto-merge] mergeable=null — waiting for GitHub to compute…")
                 time.sleep(_MERGE_POLL_SECONDS)
                 continue
 
             if not mergeable:
                 # Merge conflict — cannot auto-merge.
+                log.info("[auto-merge] PR has merge conflicts — cannot auto-merge.")
                 return False
 
             # Attempt the merge if CI is clean or unstable (some repos
@@ -175,12 +192,21 @@ class GitHubClient:
                     self.merge_pull_request(
                         owner, repo, pr_number, merge_method=merge_method,
                     )
+                    log.info("[auto-merge] Merge succeeded!")
                     return True
-                except requests.HTTPError:
-                    # Merge may fail if a required status check just flipped.
-                    # Fall through and retry on the next poll.
-                    pass
+                except requests.HTTPError as exc:
+                    log.warning(
+                        "[auto-merge] Merge API returned %s: %s — will retry.",
+                        exc.response.status_code if exc.response is not None else "?",
+                        exc.response.text[:200] if exc.response is not None else str(exc),
+                    )
+            else:
+                log.info(
+                    "[auto-merge] mergeable_state=%r not in allowed set — waiting…",
+                    mergeable_state,
+                )
 
             time.sleep(_MERGE_POLL_SECONDS)
 
+        log.warning("[auto-merge] Timed out after %ds.", timeout)
         return False
