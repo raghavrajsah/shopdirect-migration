@@ -95,7 +95,7 @@ class DevinClient:
         Returns:
             API response containing the created playbook details.
         """
-        payload = {"name": name, "instructions": instructions}
+        payload = {"title": name, "body": instructions}
         return self._request("POST", "/playbooks", json=payload)
 
     # ------------------------------------------------------------------
