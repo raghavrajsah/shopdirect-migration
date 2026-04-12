@@ -688,32 +688,44 @@ def main() -> None:
             live=live,
         )
 
-        # Phase 1–2 — Parallel migration batches (tier by tier)
-        console.print("[bold blue]▶ Phase 1–2: Parallel Migration Batches[/bold blue]")
-        for tier in tiers:
-            run_tier(
+        if phase_state.foundation_status != "complete":
+            console.print(
+                "[red bold]Foundation phase did not complete — aborting migration. "
+                "Batch sessions depend on the shared types module created by the "
+                "foundation phase.[/red bold]"
+            )
+            phase_state.consolidation_status = "skipped"
+            for batch in plan["batches"]:
+                if batch["status"] == "queued":
+                    batch["status"] = "skipped"
+            _make_refresh(plan, start_time, phase_state, live)()
+        else:
+            # Phase 1–2 — Parallel migration batches (tier by tier)
+            console.print("[bold blue]▶ Phase 1–2: Parallel Migration Batches[/bold blue]")
+            for tier in tiers:
+                run_tier(
+                    client=client,
+                    plan=plan,
+                    tier=tier,
+                    playbook_id=playbook_id,
+                    frontend_repo_name=args.frontend_repo_name,
+                    max_parallel=args.max_parallel,
+                    start_time=start_time,
+                    phase_state=phase_state,
+                    live=live,
+                )
+
+            # Phase 3 — Consolidation
+            console.print("[bold blue]▶ Phase 3: Consolidation[/bold blue]")
+            run_consolidation_phase(
                 client=client,
-                plan=plan,
-                tier=tier,
                 playbook_id=playbook_id,
                 frontend_repo_name=args.frontend_repo_name,
-                max_parallel=args.max_parallel,
+                plan=plan,
                 start_time=start_time,
                 phase_state=phase_state,
                 live=live,
             )
-
-        # Phase 3 — Consolidation
-        console.print("[bold blue]▶ Phase 3: Consolidation[/bold blue]")
-        run_consolidation_phase(
-            client=client,
-            playbook_id=playbook_id,
-            frontend_repo_name=args.frontend_repo_name,
-            plan=plan,
-            start_time=start_time,
-            phase_state=phase_state,
-            live=live,
-        )
 
     # 7. Final summary
     elapsed = time.time() - start_time
