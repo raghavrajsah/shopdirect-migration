@@ -93,7 +93,7 @@ def map_session_to_batch_status(session_data: dict) -> str:
         session_data: Session details from the Devin API.
 
     Returns:
-        One of ``running``, ``complete``, or ``blocked``.
+        One of ``running``, ``complete``, ``blocked``, or ``needs_input``.
     """
     status = (session_data.get("status") or "").lower()
     status_detail = (session_data.get("status_detail") or "").lower()
@@ -103,6 +103,8 @@ def map_session_to_batch_status(session_data: dict) -> str:
         return "complete"
     if status in {"error", "suspended"}:
         return "blocked"
+    if status == "running" and status_detail == "waiting_for_user":
+        return "needs_input"
     return "running"
 
 
@@ -214,6 +216,13 @@ def run_tier(
                 continue
 
             batch["status"] = map_session_to_batch_status(data)
+
+            if batch["status"] == "needs_input":
+                session_url = batch.get("session_url", "")
+                console.print(
+                    f"[yellow]\u26a0 {batch['name']} is waiting for user input \u2192 {session_url}[/yellow]"
+                )
+
             pr_url = extract_pr_url(data)
             if pr_url:
                 batch["pr_url"] = pr_url
