@@ -17,12 +17,22 @@ from github_client import GitHubClient, parse_pr_url
 from progress import build_progress_table
 from scanner import get_all_tiers, get_batches_by_tier, scan_and_plan
 
+try:
+    from requests.exceptions import HTTPError as _RequestsHTTPError
+except ImportError:  # pragma: no cover
+    _RequestsHTTPError = None  # type: ignore[assignment,misc]
+
 _POLL_INTERVAL_SECONDS = 30
 
 # Extra polls after a session reaches terminal status to discover the PR URL.
 # The Devin API may not populate pull_requests immediately on session exit.
 _PR_DISCOVERY_RETRIES = 6
 _PR_DISCOVERY_INTERVAL_SECONDS = 10
+
+# Number of consecutive transient (5xx) poll errors to tolerate before
+# marking a session as blocked.  A single 502 Bad Gateway is common and
+# should not kill the run.
+_MAX_TRANSIENT_POLL_ERRORS = 3
 
 console = Console()
 
@@ -231,6 +241,24 @@ def extract_pr_url(session_data: dict) -> str | None:
         return pr_url
 
     return None
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True if *exc* looks like a transient server-side error (5xx).
+
+    These are safe to retry — a single 502 Bad Gateway from the Devin API
+    should not kill the entire run.
+    """
+    if _RequestsHTTPError is not None and isinstance(exc, _RequestsHTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and 500 <= resp.status_code < 600:
+            return True
+    # Fall back to string matching for wrapped or non-requests errors.
+    text = str(exc)
+    for code in ("500", "502", "503", "504"):
+        if code in text and ("Server Error" in text or "Bad Gateway" in text or "Service Unavailable" in text or "Gateway Timeout" in text):
+            return True
+    return False
 
 
 def _discover_pr_url(
@@ -461,6 +489,7 @@ def run_foundation_phase(
         console.print(f"[bold]Foundation session:[/bold] {session_url}")
 
     notified_needs_input = False
+    consecutive_errors = 0
 
     # Poll until the session reaches a terminal state.
     while True:
@@ -469,10 +498,19 @@ def run_foundation_phase(
         try:
             data = client.get_session(session_id)
         except Exception as exc:
+            if _is_transient_error(exc) and consecutive_errors < _MAX_TRANSIENT_POLL_ERRORS:
+                consecutive_errors += 1
+                console.print(
+                    f"[yellow]Foundation poll error ({consecutive_errors}/"
+                    f"{_MAX_TRANSIENT_POLL_ERRORS}): {exc} — will retry[/yellow]"
+                )
+                continue
             console.print(f"[red]Foundation poll error: {exc} — marking blocked[/red]")
             phase_state.foundation_status = "blocked"
             _refresh()
             return
+
+        consecutive_errors = 0  # Reset on successful poll.
 
         phase_state.foundation_status = map_session_to_batch_status(data)
 
@@ -596,6 +634,7 @@ def run_consolidation_phase(
         console.print(f"[bold]Consolidation session:[/bold] {session_url}")
 
     notified_needs_input = False
+    consecutive_errors = 0
 
     # Poll until the session reaches a terminal state.
     while True:
@@ -604,10 +643,19 @@ def run_consolidation_phase(
         try:
             data = client.get_session(session_id)
         except Exception as exc:
+            if _is_transient_error(exc) and consecutive_errors < _MAX_TRANSIENT_POLL_ERRORS:
+                consecutive_errors += 1
+                console.print(
+                    f"[yellow]Consolidation poll error ({consecutive_errors}/"
+                    f"{_MAX_TRANSIENT_POLL_ERRORS}): {exc} — will retry[/yellow]"
+                )
+                continue
             console.print(f"[red]Consolidation poll error: {exc} — marking blocked[/red]")
             phase_state.consolidation_status = "blocked"
             _refresh()
             return
+
+        consecutive_errors = 0  # Reset on successful poll.
 
         phase_state.consolidation_status = map_session_to_batch_status(data)
 
@@ -682,6 +730,7 @@ def run_tier(
     pending = list(tier_batches)
     active: dict[str, dict] = {}  # session_id -> batch
     notified_needs_input: set[str] = set()  # session_ids already warned about
+    poll_error_counts: dict[str, int] = {}  # session_id -> consecutive error count
 
     def _launch(batch: dict) -> None:
         """Create a Devin session for *batch* and mark it running."""
@@ -726,11 +775,21 @@ def run_tier(
             try:
                 data = client.get_session(session_id)
             except Exception as exc:
+                err_count = poll_error_counts.get(session_id, 0) + 1
+                poll_error_counts[session_id] = err_count
+                if _is_transient_error(exc) and err_count < _MAX_TRANSIENT_POLL_ERRORS:
+                    console.print(
+                        f"[yellow]Poll error for {batch['name']} ({err_count}/"
+                        f"{_MAX_TRANSIENT_POLL_ERRORS}): {exc} — will retry[/yellow]"
+                    )
+                    continue
                 console.print(f"[red]Poll error for {batch['name']}: {exc} — marking blocked[/red]")
                 batch["status"] = "blocked"
                 batch["error"] = str(exc)
                 finished_ids.append(session_id)
                 continue
+
+            poll_error_counts[session_id] = 0  # Reset on successful poll.
 
             batch["status"] = map_session_to_batch_status(data)
 
