@@ -34,6 +34,10 @@ _PR_DISCOVERY_INTERVAL_SECONDS = 10
 # should not kill the run.
 _MAX_TRANSIENT_POLL_ERRORS = 3
 
+# Number of retries when creating a Devin session fails with a transient error.
+_MAX_SESSION_CREATE_RETRIES = 3
+_SESSION_CREATE_RETRY_DELAY = 15
+
 console = Console()
 
 
@@ -261,6 +265,48 @@ def _is_transient_error(exc: Exception) -> bool:
     return False
 
 
+def _create_session_with_retry(
+    client: DevinClient,
+    label: str,
+    **kwargs: object,
+) -> dict | None:
+    """Create a Devin session, retrying on transient errors.
+
+    Args:
+        client: Initialised Devin API client.
+        label: Human-readable phase/batch name for log messages.
+        **kwargs: Forwarded to ``client.create_session()``.
+
+    Returns:
+        The API response dict on success, or ``None`` if all retries failed.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_SESSION_CREATE_RETRIES + 1):
+        try:
+            resp = client.create_session(**kwargs)  # type: ignore[arg-type]
+            return resp
+        except Exception as exc:
+            last_exc = exc
+            if _is_transient_error(exc) and attempt < _MAX_SESSION_CREATE_RETRIES:
+                print(
+                    f">>> Session creation for {label} failed (attempt {attempt}/"
+                    f"{_MAX_SESSION_CREATE_RETRIES}): {exc} — retrying in "
+                    f"{_SESSION_CREATE_RETRY_DELAY}s…"
+                )
+                console.print(
+                    f"[yellow]Session creation for {label} failed (attempt "
+                    f"{attempt}/{_MAX_SESSION_CREATE_RETRIES}): {exc} — "
+                    f"retrying…[/yellow]"
+                )
+                time.sleep(_SESSION_CREATE_RETRY_DELAY)
+            else:
+                break
+
+    print(f">>> Failed to create session for {label}: {last_exc}")
+    console.print(f"[red]Failed to create session for {label}: {last_exc}[/red]")
+    return None
+
+
 def _discover_pr_url(
     client: DevinClient,
     session_id: str,
@@ -460,17 +506,17 @@ def run_foundation_phase(
     phase_state.foundation_status = "running"
     _refresh()
 
-    try:
-        resp = client.create_session(
-            prompt=_FOUNDATION_PROMPT,
-            playbook_id=playbook_id,
-            repos=[frontend_repo_name],
-            tags=["ts-migration", "foundation"],
-            title="ShopDirect TS Migration: Foundation",
-            max_acu_limit=10,
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to create foundation session: {exc}[/red]")
+    resp = _create_session_with_retry(
+        client,
+        "Foundation",
+        prompt=_FOUNDATION_PROMPT,
+        playbook_id=playbook_id,
+        repos=[frontend_repo_name],
+        tags=["ts-migration", "foundation"],
+        title="ShopDirect TS Migration: Foundation",
+        max_acu_limit=10,
+    )
+    if resp is None:
         phase_state.foundation_status = "blocked"
         _refresh()
         return
@@ -605,17 +651,17 @@ def run_consolidation_phase(
     phase_state.consolidation_status = "running"
     _refresh()
 
-    try:
-        resp = client.create_session(
-            prompt=_CONSOLIDATION_PROMPT,
-            playbook_id=playbook_id,
-            repos=[frontend_repo_name],
-            tags=["ts-migration", "consolidation"],
-            title="ShopDirect TS Migration: Consolidation",
-            max_acu_limit=10,
-        )
-    except Exception as exc:
-        console.print(f"[red]Failed to create consolidation session: {exc}[/red]")
+    resp = _create_session_with_retry(
+        client,
+        "Consolidation",
+        prompt=_CONSOLIDATION_PROMPT,
+        playbook_id=playbook_id,
+        repos=[frontend_repo_name],
+        tags=["ts-migration", "consolidation"],
+        title="ShopDirect TS Migration: Consolidation",
+        max_acu_limit=10,
+    )
+    if resp is None:
         phase_state.consolidation_status = "blocked"
         _refresh()
         return
@@ -734,32 +780,36 @@ def run_tier(
 
     def _launch(batch: dict) -> None:
         """Create a Devin session for *batch* and mark it running."""
-        try:
-            resp = client.create_session(
-                prompt=build_batch_prompt(batch),
-                playbook_id=playbook_id,
-                repos=[frontend_repo_name],
-                tags=["ts-migration", f"batch-{batch['name']}"],
-                title=f"ShopDirect TS Migration: {batch['name']}",
-                max_acu_limit=10,
-            )
-            session_id = resp.get("session_id") or resp.get("id")
-            if not session_id:
-                console.print(
-                    f"[red]API returned no session ID for {batch['name']} — marking blocked[/red]"
-                )
-                batch["status"] = "blocked"
-                return
-            session_url = resp.get("url") or resp.get("session_url", "")
-            batch["status"] = "running"
-            batch["session_id"] = session_id
-            if session_url:
-                batch["session_url"] = session_url
-            active[session_id] = batch
-            tracker.register(session_id, f"Batch: {batch['name']}")
-        except Exception as exc:
-            console.print(f"[red]Failed to create session for {batch['name']}: {exc}[/red]")
+        resp = _create_session_with_retry(
+            client,
+            f"Batch: {batch['name']}",
+            prompt=build_batch_prompt(batch),
+            playbook_id=playbook_id,
+            repos=[frontend_repo_name],
+            tags=["ts-migration", f"batch-{batch['name']}"],
+            title=f"ShopDirect TS Migration: {batch['name']}",
+            max_acu_limit=10,
+        )
+        if resp is None:
             batch["status"] = "blocked"
+            _refresh()
+            return
+        session_id = resp.get("session_id") or resp.get("id")
+        if not session_id:
+            print(f">>> API returned no session ID for {batch['name']}")
+            console.print(
+                f"[red]API returned no session ID for {batch['name']} — marking blocked[/red]"
+            )
+            batch["status"] = "blocked"
+            _refresh()
+            return
+        session_url = resp.get("url") or resp.get("session_url", "")
+        batch["status"] = "running"
+        batch["session_id"] = session_id
+        if session_url:
+            batch["session_url"] = session_url
+        active[session_id] = batch
+        tracker.register(session_id, f"Batch: {batch['name']}")
         _refresh()
 
     # Seed initial sessions up to max_parallel.
