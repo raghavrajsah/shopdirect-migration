@@ -68,7 +68,7 @@ The scanner assigns files to tiers based on their top-level directory under `src
 | 3 | `components` | React components that import from tiers 1–2 |
 | 4 | `pages` | Top-level pages that compose components from tier 3 |
 
-Tiers execute sequentially. Within a tier, batches run concurrently up to `--max-parallel`. This means tier 1 batches all finish and merge before tier 2 starts, preventing import breakage during migration.
+Tiers execute sequentially. Within a tier, batches run concurrently up to `--max-parallel` (default: 2). A configurable cooldown (`--tier-cooldown`, default: 45s) is inserted between tiers to let the Devin platform fully release session slots before the next tier launches — without this, the first session of a new tier often hits a 429 rate limit. This means tier 1 batches all finish, the cooldown elapses, and then tier 2 starts, preventing both import breakage and session-slot contention.
 
 ## Session Lifecycle
 
@@ -105,7 +105,7 @@ The orchestrator handles four categories of API failure:
 | Error | Detection | Retry strategy |
 |---|---|---|
 | 5xx (502, 503, etc.) | HTTP status code on `requests.HTTPError` | 3 retries, 15s apart (session creation); next poll cycle (polling) |
-| 429 rate limit | HTTP 429 status code | 6 retries, 60s apart — waits for concurrent session slots |
+| 429 rate limit | HTTP 429 status code | 6 retries, 60s apart — waits for concurrent session slots. Inter-tier cooldown (45s default) reduces occurrence. |
 | Connection errors | Exception type name (`RemoteDisconnected`, `ConnectionResetError`, etc.) + exception chain + string matching | Same as 5xx — 3 retries, 15s apart |
 | Blocked batch with valid PR | Batch `status == "blocked"` but `pr_url` exists | PR still included in merge gate auto-merge |
 

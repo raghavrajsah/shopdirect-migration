@@ -73,7 +73,8 @@ The orchestrator decides *what* to migrate, *when*, and *in what order*. Devin d
 ### Operator Controls
 
 - **Dry-run mode** (`--dry-run`) — Preview the migration plan without launching any sessions
-- **Configurable parallelism** (`--max-parallel N`) — Control concurrent sessions per tier
+- **Configurable parallelism** (`--max-parallel N`) — Control concurrent sessions per tier (default: 2)
+- **Inter-tier cooldown** (`--tier-cooldown N`) — Seconds to wait between tiers for session slots to free up (default: 45)
 - **Ctrl+C cleanup** — Catches interrupts and offers to terminate all running Devin sessions in one step
 - **Live progress table** — Rich terminal UI showing per-batch status, tier, file counts, PR links, and elapsed time, updated in real-time
 
@@ -112,7 +113,7 @@ python migrate.py --repo ../shopdirect-frontend --dry-run
 python migrate.py \
   --repo ../shopdirect-frontend \
   --frontend-repo-name raghavrajsah/shopdirect-frontend \
-  --max-parallel 3
+  --max-parallel 2
 
 # Manual review mode (pause at merge gates)
 python migrate.py \
@@ -139,7 +140,7 @@ This project is a working example of turning a vague client pain point ("we need
 ## Future Improvements
 
 - **Incremental re-runs** — Resume from the last successful phase instead of restarting from scratch
-- **Adaptive parallelism** — Dynamically adjust `--max-parallel` based on observed 429 rate and active session count
+- ~~**Adaptive parallelism**~~ — *(Partially addressed: default parallelism lowered to 2 and inter-tier cooldown added to prevent 429s. Full adaptive scaling remains a future goal.)*
 - **Cross-batch dependency analysis** — Use import graph analysis to assign tiers automatically instead of relying on a static folder-to-tier map
 - **Consolidation loop** — Re-run consolidation iteratively until `tsc --noEmit` produces zero errors
 - **Multi-repo support** — Extend the orchestrator to handle monorepos or multi-package workspaces
