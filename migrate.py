@@ -71,11 +71,19 @@ def build_batch_prompt(batch: dict) -> str:
 def is_terminal_status(session_data: dict) -> bool:
     """Return True if the session has reached a terminal state.
 
+    Terminal states: ``exit``, ``error``, ``suspended``, or
+    ``running`` with ``status_detail == "finished"``.
+
     Args:
         session_data: Session details from the Devin API.
     """
     status = session_data.get("status", "").lower()
-    return status in {"finished", "stopped", "error", "suspended"}
+    status_detail = session_data.get("status_detail", "").lower()
+    if status in {"exit", "error", "suspended"}:
+        return True
+    if status == "running" and status_detail == "finished":
+        return True
+    return False
 
 
 def map_session_to_batch_status(session_data: dict) -> str:
@@ -88,7 +96,10 @@ def map_session_to_batch_status(session_data: dict) -> str:
         One of ``running``, ``complete``, or ``blocked``.
     """
     status = session_data.get("status", "").lower()
-    if status in {"finished", "stopped"}:
+    status_detail = session_data.get("status_detail", "").lower()
+    if status == "exit":
+        return "complete"
+    if status == "running" and status_detail == "finished":
         return "complete"
     if status in {"error", "suspended"}:
         return "blocked"
@@ -106,7 +117,7 @@ def extract_pr_url(session_data: dict) -> str | None:
     """
     pull_requests = session_data.get("pull_requests") or []
     if pull_requests:
-        url = pull_requests[0].get("url") or pull_requests[0].get("html_url")
+        url = pull_requests[0].get("pr_url") or pull_requests[0].get("html_url")
         if url:
             return url
 
