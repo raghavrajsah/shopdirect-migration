@@ -77,8 +77,8 @@ def is_terminal_status(session_data: dict) -> bool:
     Args:
         session_data: Session details from the Devin API.
     """
-    status = session_data.get("status", "").lower()
-    status_detail = session_data.get("status_detail", "").lower()
+    status = (session_data.get("status") or "").lower()
+    status_detail = (session_data.get("status_detail") or "").lower()
     if status in {"exit", "error", "suspended"}:
         return True
     if status == "running" and status_detail == "finished":
@@ -95,8 +95,8 @@ def map_session_to_batch_status(session_data: dict) -> str:
     Returns:
         One of ``running``, ``complete``, or ``blocked``.
     """
-    status = session_data.get("status", "").lower()
-    status_detail = session_data.get("status_detail", "").lower()
+    status = (session_data.get("status") or "").lower()
+    status_detail = (session_data.get("status_detail") or "").lower()
     if status == "exit":
         return "complete"
     if status == "running" and status_detail == "finished":
