@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.live import Live
 
 from devin_client import DevinClient
+from github_client import GitHubClient, parse_pr_url
 from progress import build_progress_table
 from scanner import get_all_tiers, get_batches_by_tier, scan_and_plan
 
@@ -255,11 +256,10 @@ def _make_refresh(
     return _refresh
 
 
-def _wait_for_merge(pr_urls: list[str], message: str) -> None:
+def _wait_for_merge_manual(pr_urls: list[str], message: str) -> None:
     """Pause execution and wait for the user to confirm PRs are merged.
 
-    Temporarily stops the ``rich.live.Live`` context (which would interfere
-    with ``input()``) by printing the prompt via the console.
+    Used when ``--no-auto-merge`` is set.
 
     Args:
         pr_urls: List of PR URLs to display.
@@ -271,6 +271,36 @@ def _wait_for_merge(pr_urls: list[str], message: str) -> None:
         console.print(f"  • {url}")
     console.print()
     input("Press Enter to continue once the PR(s) above are merged… ")
+    console.print()
+
+
+def _auto_merge_prs(gh: GitHubClient, pr_urls: list[str], phase_label: str) -> None:
+    """Auto-merge a list of PRs via the GitHub API.
+
+    For each PR, polls until it is mergeable, then squash-merges it.
+    Prints status for each PR.  If a merge fails the user is warned
+    but the orchestrator continues.
+
+    Args:
+        gh: Initialised GitHub API client.
+        pr_urls: GitHub PR URLs to merge.
+        phase_label: Human-readable phase name for log output.
+    """
+    console.print()
+    console.print(f"[bold green]Auto-merging {phase_label} PR(s)…[/bold green]")
+    for url in pr_urls:
+        console.print(f"  Merging {url} …", end=" ")
+        try:
+            owner, repo, pr_number = parse_pr_url(url)
+            ok = gh.wait_and_merge(owner, repo, pr_number)
+            if ok:
+                console.print("[green]merged[/green]")
+            else:
+                console.print(
+                    "[red]failed (conflict, CI, or timeout) — merge manually[/red]"
+                )
+        except Exception as exc:
+            console.print(f"[red]error: {exc}[/red]")
     console.print()
 
 
@@ -714,6 +744,16 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Devin repo identifier for the frontend repo (required unless --dry-run).",
     )
+    parser.add_argument(
+        "--no-auto-merge",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable automatic PR merging between phases. "
+            "When set, the orchestrator pauses and waits for the user "
+            "to merge PRs manually before continuing."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -727,8 +767,10 @@ def main() -> None:
     3. **Consolidation** — reconciles cross-batch type inconsistencies.
 
     Merge gates between phases ensure PRs are merged before dependent
-    phases begin.  Ctrl+C triggers a cleanup prompt that can terminate
-    all running Devin sessions.
+    phases begin.  By default PRs are auto-merged via the GitHub API;
+    pass ``--no-auto-merge`` to pause for manual review instead.
+    Ctrl+C triggers a cleanup prompt that can terminate all running
+    Devin sessions.
     """
     args = _parse_args()
 
@@ -766,9 +808,19 @@ def main() -> None:
         console.print("[red]--frontend-repo-name is required for live runs.[/red]")
         raise SystemExit(1)
 
-    # 5. Init client, playbook & tracker
+    # 5. Init client, playbook, tracker & optional GitHub client
     client = DevinClient.from_env()
     tracker = SessionTracker()
+
+    gh: GitHubClient | None = None
+    if not args.no_auto_merge:
+        try:
+            gh = GitHubClient.from_env()
+            console.print("[green]GitHub client initialised — PRs will be auto-merged.[/green]")
+        except RuntimeError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            console.print("[yellow]Falling back to manual merge gates.[/yellow]")
+            args.no_auto_merge = True
 
     console.print("[bold]Loading playbook …[/bold]")
     playbook_text = load_playbook()
@@ -815,14 +867,18 @@ def main() -> None:
                 )
                 sys.exit(1)
 
-            # Merge gate — wait for user to merge the foundation PR.
+            # Merge gate — auto-merge or wait for manual merge.
             if phase_state.foundation_pr_url:
                 live.stop()
-                _wait_for_merge(
-                    [phase_state.foundation_pr_url],
-                    "Foundation PR is ready. Please review and merge it, "
-                    "then press Enter to continue…",
-                )
+                if args.no_auto_merge:
+                    _wait_for_merge_manual(
+                        [phase_state.foundation_pr_url],
+                        "Foundation PR is ready. Please review and merge it, "
+                        "then press Enter to continue…",
+                    )
+                else:
+                    assert gh is not None
+                    _auto_merge_prs(gh, [phase_state.foundation_pr_url], "foundation")
                 live.start()
 
             # ── Phase 1–2 — Parallel migration batches (tier by tier) ──
@@ -841,18 +897,22 @@ def main() -> None:
                     live=live,
                 )
 
-            # Merge gate — wait for user to merge all batch PRs.
+            # Merge gate — auto-merge or wait for manual merge.
             batch_pr_urls = [
                 b["pr_url"] for b in plan["batches"]
                 if b.get("pr_url") and b["status"] == "complete"
             ]
             if batch_pr_urls:
                 live.stop()
-                _wait_for_merge(
-                    batch_pr_urls,
-                    "All batch PRs are ready. Please review and merge them, "
-                    "then press Enter to continue consolidation…",
-                )
+                if args.no_auto_merge:
+                    _wait_for_merge_manual(
+                        batch_pr_urls,
+                        "All batch PRs are ready. Please review and merge them, "
+                        "then press Enter to continue consolidation…",
+                    )
+                else:
+                    assert gh is not None
+                    _auto_merge_prs(gh, batch_pr_urls, "batch")
                 live.start()
 
             # ── Phase 3 — Consolidation ──
