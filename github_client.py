@@ -74,6 +74,46 @@ class GitHubClient:
             )
         return cls(token)
 
+    def validate_repo_access(self, owner: str, repo: str) -> None:
+        """Verify the token can access the given repository.
+
+        Makes a lightweight ``GET /repos/{owner}/{repo}`` call.  Raises
+        a clear error if the token lacks access (404) or is invalid (401/403).
+
+        Args:
+            owner: Repository owner (user or org).
+            repo: Repository name.
+
+        Raises:
+            RuntimeError: If the token cannot access the repository.
+        """
+        url = f"{self.BASE}/repos/{owner}/{repo}"
+        resp = self._session.get(url)
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "GITHUB_TOKEN is invalid or expired (401 Unauthorized). "
+                "Generate a new token at https://github.com/settings/tokens"
+            )
+        if resp.status_code == 403:
+            raise RuntimeError(
+                f"GITHUB_TOKEN does not have permission to access {owner}/{repo} "
+                f"(403 Forbidden). Ensure the token has the 'repo' scope."
+            )
+        if resp.status_code == 404:
+            raise RuntimeError(
+                f"GITHUB_TOKEN cannot access {owner}/{repo} (404 Not Found). "
+                f"This usually means:\n"
+                f"  • The repo is private and the token lacks 'repo' scope\n"
+                f"  • The token is a fine-grained PAT not scoped to this repo\n"
+                f"Generate a token with 'repo' scope at "
+                f"https://github.com/settings/tokens"
+            )
+        resp.raise_for_status()
+        log.info(
+            "[validate] Token has access to %s/%s",
+            owner, repo,
+        )
+
     # ------------------------------------------------------------------
     # Pull request helpers
     # ------------------------------------------------------------------

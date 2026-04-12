@@ -914,6 +914,23 @@ def main() -> None:
             console.print("[yellow]Falling back to manual merge gates.[/yellow]")
             args.no_auto_merge = True
 
+    # Validate the token can access the target frontend repo before
+    # spending time on foundation.  The repo name is "owner/repo".
+    if gh is not None and args.frontend_repo_name:
+        parts = args.frontend_repo_name.split("/", 1)
+        if len(parts) == 2:
+            try:
+                gh.validate_repo_access(parts[0], parts[1])
+                console.print(
+                    f"[green]GitHub token verified — has access to "
+                    f"{args.frontend_repo_name}.[/green]"
+                )
+            except RuntimeError as exc:
+                console.print(f"[bold red]{exc}[/bold red]")
+                console.print("[yellow]Falling back to manual merge gates.[/yellow]")
+                gh = None
+                args.no_auto_merge = True
+
     console.print("[bold]Loading playbook …[/bold]")
     playbook_text = load_playbook()
     playbook_resp = client.create_playbook(
