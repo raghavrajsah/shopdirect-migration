@@ -207,7 +207,10 @@ def run_tier(
             try:
                 data = client.get_session(session_id)
             except Exception as exc:
-                console.print(f"[red]Poll error for {batch['name']}: {exc}[/red]")
+                console.print(f"[red]Poll error for {batch['name']}: {exc} — marking blocked[/red]")
+                batch["status"] = "blocked"
+                batch["error"] = str(exc)
+                finished_ids.append(session_id)
                 continue
 
             batch["status"] = map_session_to_batch_status(data)
@@ -284,6 +287,10 @@ def main() -> None:
         return
 
     # 4. Validate required args for live run
+    if args.max_parallel < 1:
+        console.print("[red]--max-parallel must be at least 1.[/red]")
+        raise SystemExit(1)
+
     if not args.frontend_repo_name:
         console.print("[red]--frontend-repo-name is required for live runs.[/red]")
         raise SystemExit(1)
