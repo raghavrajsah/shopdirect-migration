@@ -10,6 +10,7 @@ _STATUS_LABELS: dict[str, str] = {
     "running": "\U0001f504 RUNNING",
     "complete": "\u2705 COMPLETE",
     "blocked": "\u274c BLOCKED",
+    "needs_input": "\u26a0\ufe0f NEEDS INPUT",
     "skipped": "\u23f8\ufe0f SKIPPED",
 }
 
