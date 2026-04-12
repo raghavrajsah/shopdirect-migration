@@ -44,6 +44,12 @@ _SESSION_CREATE_RETRY_DELAY = 15
 _MAX_RATE_LIMIT_RETRIES = 6
 _RATE_LIMIT_RETRY_DELAY = 60  # seconds
 
+# Cooldown between tiers — gives the Devin platform time to fully release
+# session slots after sessions reach terminal status.  Without this, the
+# next tier's first session creation often hits a 429 because the platform
+# hasn't freed the slot yet.
+_INTER_TIER_COOLDOWN_SECONDS = 45
+
 console = Console()
 
 
@@ -1024,13 +1030,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=3,
-        help="Max concurrent Devin sessions within a tier (default: 3).",
+        default=2,
+        help="Max concurrent Devin sessions within a tier (default: 2).",
     )
     parser.add_argument(
         "--frontend-repo-name",
         default=None,
         help="Devin repo identifier for the frontend repo (required unless --dry-run).",
+    )
+    parser.add_argument(
+        "--tier-cooldown",
+        type=int,
+        default=_INTER_TIER_COOLDOWN_SECONDS,
+        help=(
+            "Seconds to wait between tiers for session slots to free up "
+            f"(default: {_INTER_TIER_COOLDOWN_SECONDS})."
+        ),
     )
     parser.add_argument(
         "--no-auto-merge",
@@ -1225,7 +1240,7 @@ def main() -> None:
 
             # ── Phase 1–2 — Parallel migration batches (tier by tier) ──
             console.print("[bold blue]\u25b6 Phase 1\u20132: Parallel Migration Batches[/bold blue]")
-            for tier in tiers:
+            for i, tier in enumerate(tiers):
                 run_tier(
                     client=client,
                     plan=plan,
@@ -1238,6 +1253,20 @@ def main() -> None:
                     tracker=tracker,
                     live=live,
                 )
+
+                # Cooldown between tiers — give the platform time to fully
+                # release session slots before the next tier launches.
+                cooldown = args.tier_cooldown
+                if i < len(tiers) - 1 and cooldown > 0:
+                    print(
+                        f"\n>>> Tier {tier} complete. Cooling down "
+                        f"{cooldown}s before tier {tiers[i + 1]}…"
+                    )
+                    console.print(
+                        f"[dim]Tier {tier} complete — cooling down "
+                        f"{cooldown}s before next tier…[/dim]"
+                    )
+                    time.sleep(cooldown)
 
             # Merge gate — always pause after batches complete.
             # Collect PR URLs from ALL batches that have one, regardless of
