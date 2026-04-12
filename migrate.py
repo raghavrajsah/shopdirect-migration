@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +41,49 @@ class PhaseState:
         self.foundation_pr_url: str | None = None
         self.consolidation_status: str = "queued"
         self.consolidation_pr_url: str | None = None
+
+
+# ------------------------------------------------------------------
+# Session tracker — records every session launched during the run so
+# that a Ctrl+C handler can offer to terminate them all.
+# ------------------------------------------------------------------
+
+
+class SessionTracker:
+    """Tracks all Devin session IDs created during a migration run.
+
+    Attributes:
+        sessions: Mapping of session_id to a human-readable label.
+    """
+
+    def __init__(self) -> None:
+        self.sessions: dict[str, str] = {}  # session_id -> label
+
+    def register(self, session_id: str, label: str) -> None:
+        """Record a newly created session.
+
+        Args:
+            session_id: The Devin session identifier.
+            label: A short human-readable name (e.g. batch name or phase).
+        """
+        self.sessions[session_id] = label
+
+    def terminate_all(self, client: DevinClient) -> None:
+        """Attempt to terminate every tracked session.
+
+        Args:
+            client: Initialised Devin API client.
+        """
+        if not self.sessions:
+            console.print("[dim]No sessions to stop.[/dim]")
+            return
+
+        for session_id, label in self.sessions.items():
+            try:
+                client.terminate_session(session_id)
+                console.print(f"  [red]Stopped[/red] {label} ({session_id})")
+            except Exception as exc:
+                console.print(f"  [yellow]Could not stop {label} ({session_id}): {exc}[/yellow]")
 
 
 # ------------------------------------------------------------------
@@ -211,6 +255,25 @@ def _make_refresh(
     return _refresh
 
 
+def _wait_for_merge(pr_urls: list[str], message: str) -> None:
+    """Pause execution and wait for the user to confirm PRs are merged.
+
+    Temporarily stops the ``rich.live.Live`` context (which would interfere
+    with ``input()``) by printing the prompt via the console.
+
+    Args:
+        pr_urls: List of PR URLs to display.
+        message: The prompt message shown above the PR list.
+    """
+    console.print()
+    console.print(f"[bold yellow]{message}[/bold yellow]")
+    for url in pr_urls:
+        console.print(f"  • {url}")
+    console.print()
+    input("Press Enter to continue once the PR(s) above are merged… ")
+    console.print()
+
+
 # ------------------------------------------------------------------
 # Phase 0 — Foundation
 # ------------------------------------------------------------------
@@ -258,6 +321,7 @@ def run_foundation_phase(
     plan: dict,
     start_time: float,
     phase_state: PhaseState,
+    tracker: SessionTracker,
     live: Live,
 ) -> None:
     """Launch a single Devin session for the foundation phase and poll until done.
@@ -273,6 +337,7 @@ def run_foundation_phase(
         plan: The full migration plan (used for progress display).
         start_time: Wall-clock start time.
         phase_state: Shared mutable phase state.
+        tracker: Session tracker for Ctrl+C cleanup.
         live: Active ``rich.live.Live`` context for refreshing the table.
     """
     _refresh = _make_refresh(plan, start_time, phase_state, live)
@@ -301,6 +366,8 @@ def run_foundation_phase(
         phase_state.foundation_status = "blocked"
         _refresh()
         return
+
+    tracker.register(session_id, "Foundation")
 
     session_url = resp.get("url") or resp.get("session_url", "")
     if session_url:
@@ -377,6 +444,7 @@ def run_consolidation_phase(
     plan: dict,
     start_time: float,
     phase_state: PhaseState,
+    tracker: SessionTracker,
     live: Live,
 ) -> None:
     """Launch a single Devin session for the consolidation phase and poll until done.
@@ -392,6 +460,7 @@ def run_consolidation_phase(
         plan: The full migration plan (used for progress display).
         start_time: Wall-clock start time.
         phase_state: Shared mutable phase state.
+        tracker: Session tracker for Ctrl+C cleanup.
         live: Active ``rich.live.Live`` context for refreshing the table.
     """
     _refresh = _make_refresh(plan, start_time, phase_state, live)
@@ -420,6 +489,8 @@ def run_consolidation_phase(
         phase_state.consolidation_status = "blocked"
         _refresh()
         return
+
+    tracker.register(session_id, "Consolidation")
 
     session_url = resp.get("url") or resp.get("session_url", "")
     if session_url:
@@ -471,6 +542,7 @@ def run_tier(
     max_parallel: int,
     start_time: float,
     phase_state: PhaseState,
+    tracker: SessionTracker,
     live: Live,
 ) -> None:
     """Launch and monitor all batches in a single tier.
@@ -487,6 +559,7 @@ def run_tier(
         max_parallel: Maximum concurrent sessions within the tier.
         start_time: Wall-clock start time (from ``time.time()``).
         phase_state: Shared mutable phase state.
+        tracker: Session tracker for Ctrl+C cleanup.
         live: Active ``rich.live.Live`` context for refreshing the table.
     """
     tier_batches = get_batches_by_tier(plan, tier)
@@ -524,6 +597,7 @@ def run_tier(
             if session_url:
                 batch["session_url"] = session_url
             active[session_id] = batch
+            tracker.register(session_id, f"Batch: {batch['name']}")
         except Exception as exc:
             console.print(f"[red]Failed to create session for {batch['name']}: {exc}[/red]")
             batch["status"] = "blocked"
@@ -575,6 +649,41 @@ def run_tier(
 
 
 # ------------------------------------------------------------------
+# Ctrl+C cleanup
+# ------------------------------------------------------------------
+
+
+def _handle_interrupt(client: DevinClient, tracker: SessionTracker) -> None:
+    """Prompt the user and optionally terminate all tracked sessions.
+
+    Args:
+        client: Initialised Devin API client.
+        tracker: Contains all session IDs launched during this run.
+    """
+    console.print()
+    console.print("[bold red]Cancelling...[/bold red]")
+
+    if not tracker.sessions:
+        console.print("[dim]No running sessions to clean up.[/dim]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Stop all {len(tracker.sessions)} running Devin session(s)? (y/n)[/bold]")
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+
+    if answer == "y":
+        tracker.terminate_all(client)
+    else:
+        console.print("[dim]Sessions left running:[/dim]")
+        for session_id, label in tracker.sessions.items():
+            console.print(f"  • {label} ({session_id})")
+
+    raise SystemExit(1)
+
+
+# ------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------
 
@@ -616,6 +725,10 @@ def main() -> None:
     1. **Foundation** — creates shared canonical types and TS config.
     2. **Parallel migration** — migrates batches tier-by-tier.
     3. **Consolidation** — reconciles cross-batch type inconsistencies.
+
+    Merge gates between phases ensure PRs are merged before dependent
+    phases begin.  Ctrl+C triggers a cleanup prompt that can terminate
+    all running Devin sessions.
     """
     args = _parse_args()
 
@@ -653,8 +766,10 @@ def main() -> None:
         console.print("[red]--frontend-repo-name is required for live runs.[/red]")
         raise SystemExit(1)
 
-    # 5. Init client & playbook
+    # 5. Init client, playbook & tracker
     client = DevinClient.from_env()
+    tracker = SessionTracker()
+
     console.print("[bold]Loading playbook …[/bold]")
     playbook_text = load_playbook()
     playbook_resp = client.create_playbook(
@@ -664,56 +779,97 @@ def main() -> None:
     playbook_id = playbook_resp.get("playbook_id", playbook_resp.get("id", ""))
     console.print(f"[green]Playbook created:[/green] {playbook_id}")
 
-    # 6. Execute three-phase migration
+    # 6. Execute three-phase migration with Ctrl+C handling
     tiers = get_all_tiers(plan)
-    with Live(
-        build_progress_table(
-            plan,
-            0,
-            foundation_status=phase_state.foundation_status,
-            consolidation_status=phase_state.consolidation_status,
-        ),
-        console=console,
-        refresh_per_second=1,
-    ) as live:
-        # Phase 0 — Foundation
-        console.print("[bold blue]▶ Phase 0: Foundation[/bold blue]")
-        run_foundation_phase(
-            client=client,
-            playbook_id=playbook_id,
-            frontend_repo_name=args.frontend_repo_name,
-            plan=plan,
-            start_time=start_time,
-            phase_state=phase_state,
-            live=live,
-        )
-
-        # Phase 1–2 — Parallel migration batches (tier by tier)
-        console.print("[bold blue]▶ Phase 1–2: Parallel Migration Batches[/bold blue]")
-        for tier in tiers:
-            run_tier(
+    try:
+        with Live(
+            build_progress_table(
+                plan,
+                0,
+                foundation_status=phase_state.foundation_status,
+                consolidation_status=phase_state.consolidation_status,
+            ),
+            console=console,
+            refresh_per_second=1,
+        ) as live:
+            # ── Phase 0 — Foundation ──
+            console.print("[bold blue]\u25b6 Phase 0: Foundation[/bold blue]")
+            run_foundation_phase(
                 client=client,
-                plan=plan,
-                tier=tier,
                 playbook_id=playbook_id,
                 frontend_repo_name=args.frontend_repo_name,
-                max_parallel=args.max_parallel,
+                plan=plan,
                 start_time=start_time,
                 phase_state=phase_state,
+                tracker=tracker,
                 live=live,
             )
 
-        # Phase 3 — Consolidation
-        console.print("[bold blue]▶ Phase 3: Consolidation[/bold blue]")
-        run_consolidation_phase(
-            client=client,
-            playbook_id=playbook_id,
-            frontend_repo_name=args.frontend_repo_name,
-            plan=plan,
-            start_time=start_time,
-            phase_state=phase_state,
-            live=live,
-        )
+            # Abort if foundation failed or was blocked.
+            if phase_state.foundation_status in {"blocked", "needs_input"}:
+                console.print(
+                    "[bold red]Foundation phase did not complete successfully "
+                    f"(status: {phase_state.foundation_status}). "
+                    "Aborting migration — parallel batches depend on the "
+                    "shared types created by foundation.[/bold red]"
+                )
+                sys.exit(1)
+
+            # Merge gate — wait for user to merge the foundation PR.
+            if phase_state.foundation_pr_url:
+                live.stop()
+                _wait_for_merge(
+                    [phase_state.foundation_pr_url],
+                    "Foundation PR is ready. Please review and merge it, "
+                    "then press Enter to continue…",
+                )
+                live.start()
+
+            # ── Phase 1–2 — Parallel migration batches (tier by tier) ──
+            console.print("[bold blue]\u25b6 Phase 1\u20132: Parallel Migration Batches[/bold blue]")
+            for tier in tiers:
+                run_tier(
+                    client=client,
+                    plan=plan,
+                    tier=tier,
+                    playbook_id=playbook_id,
+                    frontend_repo_name=args.frontend_repo_name,
+                    max_parallel=args.max_parallel,
+                    start_time=start_time,
+                    phase_state=phase_state,
+                    tracker=tracker,
+                    live=live,
+                )
+
+            # Merge gate — wait for user to merge all batch PRs.
+            batch_pr_urls = [
+                b["pr_url"] for b in plan["batches"]
+                if b.get("pr_url") and b["status"] == "complete"
+            ]
+            if batch_pr_urls:
+                live.stop()
+                _wait_for_merge(
+                    batch_pr_urls,
+                    "All batch PRs are ready. Please review and merge them, "
+                    "then press Enter to continue consolidation…",
+                )
+                live.start()
+
+            # ── Phase 3 — Consolidation ──
+            console.print("[bold blue]\u25b6 Phase 3: Consolidation[/bold blue]")
+            run_consolidation_phase(
+                client=client,
+                playbook_id=playbook_id,
+                frontend_repo_name=args.frontend_repo_name,
+                plan=plan,
+                start_time=start_time,
+                phase_state=phase_state,
+                tracker=tracker,
+                live=live,
+            )
+
+    except KeyboardInterrupt:
+        _handle_interrupt(client, tracker)
 
     # 7. Final summary
     elapsed = time.time() - start_time
@@ -732,8 +888,8 @@ def main() -> None:
 
     # Foundation summary
     f_label = phase_state.foundation_status
-    f_pr = phase_state.foundation_pr_url or "—"
-    console.print(f"[bold]Foundation:[/bold] {f_label} → {f_pr}")
+    f_pr = phase_state.foundation_pr_url or "\u2014"
+    console.print(f"[bold]Foundation:[/bold] {f_label} \u2192 {f_pr}")
 
     # Batch summary
     completed = [b for b in plan["batches"] if b["status"] == "complete"]
@@ -741,18 +897,18 @@ def main() -> None:
 
     console.print(f"[bold green]Completed batches:[/bold green] {len(completed)}")
     for b in completed:
-        pr = b.get("pr_url", "—")
-        console.print(f"  • {b['name']} → {pr}")
+        pr = b.get("pr_url", "\u2014")
+        console.print(f"  \u2022 {b['name']} \u2192 {pr}")
 
     if blocked:
         console.print(f"[bold red]Blocked batches:[/bold red] {len(blocked)}")
         for b in blocked:
-            console.print(f"  • {b['name']}")
+            console.print(f"  \u2022 {b['name']}")
 
     # Consolidation summary
     c_label = phase_state.consolidation_status
-    c_pr = phase_state.consolidation_pr_url or "—"
-    console.print(f"[bold]Consolidation:[/bold] {c_label} → {c_pr}")
+    c_pr = phase_state.consolidation_pr_url or "\u2014"
+    console.print(f"[bold]Consolidation:[/bold] {c_label} \u2192 {c_pr}")
 
     console.print(f"\n[dim]Total time: {int(elapsed)}s[/dim]")
 

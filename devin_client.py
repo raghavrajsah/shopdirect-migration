@@ -163,6 +163,24 @@ class DevinClient:
         payload = {"message": message}
         return self._request("POST", f"/sessions/{session_id}/messages", json=payload)
 
+    def terminate_session(self, session_id: str, *, archive: bool = False) -> dict[str, Any]:
+        """Terminate (stop) a running session.
+
+        Once terminated a session cannot be resumed.
+
+        Args:
+            session_id: The unique session identifier (without the ``devin-`` prefix).
+            archive: If ``True``, archive the session for future reference.
+
+        Returns:
+            API response confirming termination.
+        """
+        params: dict[str, Any] = {}
+        if archive:
+            params["archive"] = True
+        devin_id = session_id if session_id.startswith("devin-") else f"devin-{session_id}"
+        return self._request("DELETE", f"/sessions/{devin_id}", params=params)
+
     def list_sessions(self, *, tags: list[str] | None = None) -> dict[str, Any]:
         """List sessions, optionally filtered by tags.
 
