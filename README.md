@@ -107,18 +107,18 @@ export GITHUB_TOKEN="your-github-token"   # needed for auto-merge
 
 ```bash
 # Preview the plan
-python migrate.py --repo ../shopdirect-frontend --dry-run
+python migrate.py --repo ../shopdirect-frontend-js --dry-run
 
 # Full migration with auto-merge
 python migrate.py \
-  --repo ../shopdirect-frontend \
-  --frontend-repo-name raghavrajsah/shopdirect-frontend \
+  --repo ../shopdirect-frontend-js \
+  --frontend-repo-name raghavrajsah/shopdirect-frontend-js \
   --max-parallel 2
 
 # Manual review mode (pause at merge gates)
 python migrate.py \
-  --repo ../shopdirect-frontend \
-  --frontend-repo-name raghavrajsah/shopdirect-frontend \
+  --repo ../shopdirect-frontend-js \
+  --frontend-repo-name raghavrajsah/shopdirect-frontend-js \
   --no-auto-merge
 ```
 
